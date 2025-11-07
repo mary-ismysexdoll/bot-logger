@@ -78,8 +78,8 @@ async function readPasswordFromChannel() {
   }
   const m = /`([^`]+)`/.exec(msg.content);
   const pw = m ? m[1] : msg.content.slice(PASSWORD_PREFIX.length).trim().replace(/^`|`$/g, '');
-  currentPassword = pw; // keep in sync
-  return pw;
+  currentPassword = pw.trim();
+  return currentPassword;
 }
 
 async function registerCommands() {
@@ -190,7 +190,8 @@ app.get('/password', async (req, res) => {
     if (!client.user) {
       return res.status(503).json({ status: 'error', code: 'bot_not_ready' });
     }
-    const pw = await readPasswordFromChannel();
+    const pw = (await readPasswordFromChannel()).trim();
+    res.set('Cache-Control', 'no-store'); // avoid any proxy/browser caching
     return res.json({ password: pw });
   } catch (e) {
     console.error('GET /password error:', e);
