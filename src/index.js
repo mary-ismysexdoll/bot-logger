@@ -294,11 +294,11 @@ async function registerCommands() {
 
     new SlashCommandBuilder()
       .setName('search')
-      .setDescription('Search player logs and aggregate deduped info.')
+      .setDescription('Search for player information through the database.')
       .addStringOption((o) =>
         o
           .setName('field')
-          .setDescription('Which field to search')
+          .setDescription('What to search')
           .setRequired(true)
           .addChoices(
             { name: 'any', value: 'any' },
@@ -396,7 +396,7 @@ client.on('interactionCreate', async (interaction) => {
       .addFields(
         { name: 'Device IDs', value: deviceIds.length ? deviceIds.join('\n') : '—', inline: false },
         { name: 'Device Users', value: deviceUsers.length ? deviceUsers.join('\n') : '—', inline: false },
-        { name: 'Locations (deduped)', value: locations.length ? locations.join('\n') : '—', inline: false },
+        { name: 'Locations', value: locations.length ? locations.join('\n') : '—', inline: false },
         { name: 'All Log Timestamps', value: times.length ? times.join('\n') : '—', inline: false },
       )
       .setTimestamp(new Date());
