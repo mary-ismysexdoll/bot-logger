@@ -22,139 +22,108 @@ const {
   DISCORD_TOKEN,
   INTAKE_AUTH,
   DEFAULT_PASSWORD = 'letmein',
-
-  // Channel that must always contain exactly ONE password message
   CHANNEL_ID = '1436407803462815855',
-
-  // Optional: instant command registration for a single guild
   GUILD_ID,
-  PORT = 3000,
+  PORT = 8080,
 } = process.env;
 
-let currentPassword = DEFAULT_PASSWORD;
-
-// ---------- HTTP app ----------
 const app = express();
 app.use(express.json());
 
-// PowerShell launcher reads the password here
-app.get('/password', (req, res) => {
-  if (req.header('X-Auth') !== INTAKE_AUTH) {
-    return res.status(401).json({ status: 'error', code: 'unauthorized' });
-  }
-  return res.json({ password: currentPassword });
-});
-
-// Intake endpoint used by your .ps1 "Log" button
-app.post('/intake', async (req, res) => {
-  try {
-    if (req.header('X-Auth') !== INTAKE_AUTH) {
-      return res.status(401).json({ status: 'error', code: 'unauthorized' });
-    }
-    const { deviceUser, deviceId } = req.body || {};
-    if (!deviceUser || !deviceId) {
-      return res.status(400).json({ status: 'error', code: 'bad_body' });
-    }
-
-    const embed = new EmbedBuilder()
-      .setTitle('Checker Intake')
-      .addFields(
-        { name: 'Device User', value: String(deviceUser), inline: false },
-        { name: 'Device ID', value: String(deviceId), inline: false },
-      )
-      .setTimestamp(new Date());
-
-    const gold = new ButtonBuilder().setCustomId('ask_user').setLabel('User').setStyle(ButtonStyle.Primary);
-    const silver = new ButtonBuilder().setCustomId('ask_id').setLabel('ID').setStyle(ButtonStyle.Secondary);
-    const row = new ActionRowBuilder().addComponents(gold, silver);
-
-    const channel = await client.channels.fetch(CHANNEL_ID);
-    await channel.send({ embeds: [embed], components: [row] });
-
-    return res.json({ ok: true });
-  } catch (e) {
-    console.error('intake error', e);
-    return res.status(500).json({ status: 'error' });
-  }
-});
-
-app.get('/health', (_req, res) => res.json({ ok: true }));
+let currentPassword = DEFAULT_PASSWORD;
+const PASSWORD_PREFIX = 'GUI PASSWORD:';
 
 // ---------- Discord client ----------
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
-// Single-password-message enforcement
-const PASSWORD_PREFIX = 'GUI PASSWORD:';
-
+// Keep exactly one password message in the channel
 async function ensurePasswordMessage() {
   const channel = await client.channels.fetch(CHANNEL_ID);
-
-  // Fetch recent messages, find bot-authored password messages
   const msgs = await channel.messages.fetch({ limit: 50 });
+
   const botPwMsgs = msgs.filter(
     (m) => m.author.id === client.user.id && typeof m.content === 'string' && m.content.startsWith(PASSWORD_PREFIX)
   );
 
   let keeper;
   if (botPwMsgs.size > 0) {
-    // Keep the newest; delete the rest
     keeper = [...botPwMsgs.values()].sort((a, b) => b.createdTimestamp - a.createdTimestamp)[0];
     for (const m of botPwMsgs.values()) {
       if (m.id !== keeper.id) {
         await m.delete().catch(() => {});
       }
     }
-    // Update text if password changed
     const desired = `${PASSWORD_PREFIX} \`${currentPassword}\``;
     if (keeper.content !== desired) {
-      await keeper.edit(desired);
+      await keeper.edit(desired).catch(() => {});
     }
   } else {
-    // Post the one and only password message
     keeper = await channel.send(`${PASSWORD_PREFIX} \`${currentPassword}\``);
   }
   return keeper;
 }
 
-client.once('ready', async () => {
-  console.log(`Logged in as ${client.user.tag}`);
+// Parse the password from the single channel message (source of truth)
+async function readPasswordFromChannel() {
+  const channel = await client.channels.fetch(CHANNEL_ID);
+  const msgs = await channel.messages.fetch({ limit: 50 });
+  const msg = msgs.find(
+    (m) => m.author.id === client.user.id && typeof m.content === 'string' && m.content.startsWith(PASSWORD_PREFIX)
+  );
 
-  // Upsert slash command(s)
+  if (!msg) {
+    // If nothing exists yet, create it with currentPassword
+    await ensurePasswordMessage();
+    return currentPassword;
+  }
+  const m = /`([^`]+)`/.exec(msg.content);
+  const pw = m ? m[1] : msg.content.slice(PASSWORD_PREFIX.length).trim().replace(/^`|`$/g, '');
+  currentPassword = pw; // keep in sync
+  return pw;
+}
+
+async function registerCommands() {
   const commands = [
     new SlashCommandBuilder()
       .setName('change-password')
-      .setDescription('Set the launcher password (stored in memory and shown in the channel).')
+      .setDescription('Set the launcher password (writes it into the channel message).')
       .addStringOption((o) => o.setName('password').setDescription('New password').setRequired(true))
       .toJSON(),
   ];
-
   const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
+  if (GUILD_ID) {
+    await rest.put(Routes.applicationGuildCommands(client.user.id, GUILD_ID), { body: commands });
+    console.log('Registered GUILD commands (instant).');
+  } else {
+    await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
+    console.log('Registered GLOBAL commands (may take time).');
+  }
+}
+
+const onReady = async () => {
+  console.log(`Logged in as ${client.user.tag}`);
   try {
-    if (GUILD_ID) {
-      await rest.put(Routes.applicationGuildCommands(client.user.id, GUILD_ID), { body: commands });
-      console.log('Registered GUILD commands for fast availability.');
-    } else {
-      await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
-      console.log('Registered GLOBAL commands (may take time to appear).');
-    }
+    await registerCommands();
   } catch (err) {
     console.error('Command registration failed:', err);
   }
-
-  // Make sure the channel has exactly one password message at boot
   try {
+    // Seed the channel message with DEFAULT_PASSWORD on boot (or keep the existing one)
     await ensurePasswordMessage();
   } catch (err) {
     console.error('ensurePasswordMessage on ready failed:', err);
   }
-
-  // Periodic reconciliation (keeps exactly one message, updates if needed)
+  // Periodic reconciliation
   setInterval(() => {
     ensurePasswordMessage().catch(() => {});
   }, 120_000);
-});
+};
 
-// Slash command handler
+// Support both current and upcoming event name
+client.once('ready', onReady);
+client.once('clientReady', onReady);
+
+// Slash commands
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
@@ -164,11 +133,11 @@ client.on('interactionCreate', async (interaction) => {
     }
     currentPassword = interaction.options.getString('password', true);
     await ensurePasswordMessage().catch(() => {});
-    return interaction.reply({ content: 'Password updated and channel message refreshed.', ephemeral: true });
+    return interaction.reply({ content: 'Password updated.', ephemeral: true });
   }
 });
 
-// Buttons -> show modals (unchanged behavior)
+// Buttons → modals (unchanged)
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isButton()) return;
 
@@ -212,9 +181,60 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
+// ---------- HTTP routes ----------
+app.get('/password', async (req, res) => {
+  try {
+    if (req.header('X-Auth') !== INTAKE_AUTH) {
+      return res.status(401).json({ status: 'error', code: 'unauthorized' });
+    }
+    if (!client.user) {
+      return res.status(503).json({ status: 'error', code: 'bot_not_ready' });
+    }
+    const pw = await readPasswordFromChannel();
+    return res.json({ password: pw });
+  } catch (e) {
+    console.error('GET /password error:', e);
+    return res.status(500).json({ status: 'error' });
+  }
+});
+
+app.post('/intake', async (req, res) => {
+  try {
+    if (req.header('X-Auth') !== INTAKE_AUTH) {
+      return res.status(401).json({ status: 'error', code: 'unauthorized' });
+    }
+    const { deviceUser, deviceId } = req.body || {};
+    if (!deviceUser || !deviceId) {
+      return res.status(400).json({ status: 'error', code: 'bad_body' });
+    }
+
+    const embed = new EmbedBuilder()
+      .setTitle('Checker Intake')
+      .addFields(
+        { name: 'Device User', value: String(deviceUser), inline: false },
+        { name: 'Device ID', value: String(deviceId), inline: false },
+      )
+      .setTimestamp(new Date());
+
+    const gold = new ButtonBuilder().setCustomId('ask_user').setLabel('User').setStyle(ButtonStyle.Primary);
+    const silver = new ButtonBuilder().setCustomId('ask_id').setLabel('ID').setStyle(ButtonStyle.Secondary);
+    const row = new ActionRowBuilder().addComponents(gold, silver);
+
+    const channel = await client.channels.fetch(CHANNEL_ID);
+    await channel.send({ embeds: [embed], components: [row] });
+
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error('POST /intake error:', e);
+    return res.status(500).json({ status: 'error' });
+  }
+});
+
+app.get('/health', (_req, res) => res.json({ ok: true }));
+
 // ---------- Start ----------
 app.listen(PORT, () => console.log(`HTTP listening on :${PORT}`));
 client.login(DISCORD_TOKEN);
 
-// Helpful logging
+// Safety logging
 process.on('unhandledRejection', (e) => console.error('UnhandledRejection:', e));
