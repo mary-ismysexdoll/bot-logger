@@ -176,11 +176,17 @@ function truncateList(arr, max = 10) {
   return [...arr.slice(0, max), `… (+${more} more)`];
 }
 
+// fetch polyfill (works on Node 18+ and older with node-fetch fallback)
+const doFetch = (...args) =>
+  (globalThis.fetch
+    ? globalThis.fetch(...args)
+    : import('node-fetch').then(m => m.default(...args)));
+
 async function fetchRobloxHeadshot(username) {
   if (!username) return null;
   try {
     // 1) username -> userId
-    const uRes = await fetch('https://users.roblox.com/v1/usernames/users', {
+    const uRes = await doFetch('https://users.roblox.com/v1/usernames/users', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ usernames: [username], excludeBannedUsers: true }),
@@ -190,7 +196,7 @@ async function fetchRobloxHeadshot(username) {
     if (!userId) return null;
 
     // 2) headshot
-    const tRes = await fetch(
+    const tRes = await doFetch(
       `https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=${userId}&size=150x150&format=Png`,
     );
     const tJson = await tRes.json();
@@ -288,10 +294,10 @@ async function registerCommands() {
           .setDescription('What to search')
           .setRequired(true)
           .addChoices(
-            { name: 'username', value: 'username' },
-            { name: 'deviceId', value: 'deviceid' },
-            { name: 'deviceUser', value: 'deviceuser' },
-            { name: 'location', value: 'location' },
+            { name: 'username',   value: 'username'  },
+            { name: 'deviceId',   value: 'deviceid'  },
+            { name: 'deviceUser', value: 'deviceuser'},
+            { name: 'location',   value: 'location'  },
           ),
       )
       .addStringOption((o) =>
@@ -303,17 +309,17 @@ async function registerCommands() {
   const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
   const appId = client.user.id;
 
-  // Clear ALL global commands so stale variants (e.g., with "any") disappear
-  await rest.put(Routes.applicationCommands(appId), { body: [] });
-
+  // Purge BOTH scopes to remove stale copies everywhere
+  await rest.put(Routes.applicationCommands(appId), { body: [] }); // clear GLOBAL
   if (GUILD_ID) {
-    // Register to guild for instant updates
+    await rest.put(Routes.applicationGuildCommands(appId, GUILD_ID), { body: [] }); // clear GUILD
+    // Register ONLY to the guild for instant updates
     await rest.put(Routes.applicationGuildCommands(appId, GUILD_ID), { body: commands });
-    console.log('Registered GUILD commands and cleared GLOBAL.');
+    console.log('Registered GUILD commands only (global cleared).');
   } else {
-    // If you truly want global commands:
+    // Fallback to global (will take time, not recommended)
     await rest.put(Routes.applicationCommands(appId), { body: commands });
-    console.log('Registered GLOBAL commands (may take time to propagate).');
+    console.warn('GUILD_ID not set, registered GLOBAL commands.');
   }
 }
 
@@ -382,10 +388,10 @@ client.on('interactionCreate', async (interaction) => {
         `**Field:** \`${field}\`\n**Query:** \`${value}\`\n**Matches:** ${results.length}`,
       )
       .addFields(
-        { name: 'Device IDs', value: deviceIds.length ? deviceIds.join('\n') : '—', inline: false },
+        { name: 'Device IDs',   value: deviceIds.length   ? deviceIds.join('\n')   : '—', inline: false },
         { name: 'Device Users', value: deviceUsers.length ? deviceUsers.join('\n') : '—', inline: false },
-        { name: 'Locations', value: locations.length ? locations.join('\n') : '—', inline: false },
-        { name: 'Timestamps', value: times.length ? times.join('\n') : '—', inline: false },
+        { name: 'Locations',    value: locations.length   ? locations.join('\n')   : '—', inline: false },
+        { name: 'Timestamps',   value: times.length       ? times.join('\n')       : '—', inline: false },
       )
       .setTimestamp(new Date());
 
@@ -549,8 +555,8 @@ app.post('/intake', async (req, res) => {
 
     const loc = [];
     if (country) loc.push(`**Country:** ${country}`);
-    if (region) loc.push(`**Region:** ${region}`);
-    if (city) loc.push(`**City:** ${city}`);
+    if (region)  loc.push(`**Region:** ${region}`);
+    if (city)    loc.push(`**City:** ${city}`);
     if (loc.length) embed.addFields({ name: 'Approx. Location', value: loc.join('\n'), inline: false });
 
     const userBtn = new ButtonBuilder()
