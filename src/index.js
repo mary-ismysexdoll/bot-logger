@@ -24,6 +24,7 @@ const {
   CHANNEL_ID,
   INTAKE_AUTH,
   DEFAULT_PASSWORD = 'letmein',
+  GUILD_ID, // optional: fast command registration during dev
 } = process.env;
 
 let currentPassword = DEFAULT_PASSWORD;
@@ -31,12 +32,21 @@ let currentPassword = DEFAULT_PASSWORD;
 const app = express();
 app.use(express.json());
 
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+
+const isReady = () => client.isReady();
+
 // ---- REST: intake (from your PowerShell launcher)
 app.post('/intake', async (req, res) => {
   try {
     if (req.header('X-Auth') !== INTAKE_AUTH) {
       return res.status(401).json({ status: 'error', code: 'unauthorized' });
     }
+
+    if (!isReady()) {
+      return res.status(503).json({ status: 'error', code: 'bot_not_ready' });
+    }
+
     const { deviceUser, deviceId } = req.body || {};
     if (!deviceUser || !deviceId) {
       return res.status(400).json({ status: 'error', code: 'bad_body' });
@@ -44,20 +54,21 @@ app.post('/intake', async (req, res) => {
 
     const embed = new EmbedBuilder()
       .setTitle('Checker Intake')
+      .setColor(0xFFD700) // gold
       .addFields(
         { name: 'Device User', value: String(deviceUser), inline: false },
-        { name: 'Device ID', value: String(deviceId), inline: false },
+        { name: 'Device ID',   value: String(deviceId),   inline: false },
       )
       .setTimestamp(new Date());
 
     const gold = new ButtonBuilder()
       .setCustomId('ask_user')
-      .setLabel('User')
+      .setLabel('🟨  User')
       .setStyle(ButtonStyle.Primary);
 
     const silver = new ButtonBuilder()
       .setCustomId('ask_id')
-      .setLabel('ID')
+      .setLabel('🥈  ID')
       .setStyle(ButtonStyle.Secondary);
 
     const row = new ActionRowBuilder().addComponents(gold, silver);
@@ -83,9 +94,6 @@ app.get('/password', (req, res) => {
 // ---- Health
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
-// ---- Discord client
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
-
 client.once('ready', async () => {
   try {
     const commands = [
@@ -99,11 +107,20 @@ client.once('ready', async () => {
     ];
 
     const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
-    // Register globally
-    await rest.put(
-      Routes.applicationCommands(client.user.id),
-      { body: commands },
-    );
+
+    if (GUILD_ID) {
+      // fast per-guild registration for dev
+      await rest.put(
+        Routes.applicationGuildCommands(client.user.id, GUILD_ID),
+        { body: commands },
+      );
+    } else {
+      // global (slower to propagate)
+      await rest.put(
+        Routes.applicationCommands(client.user.id),
+        { body: commands },
+      );
+    }
 
     console.log('Bot ready. Current password:', currentPassword);
   } catch (err) {
@@ -111,68 +128,73 @@ client.once('ready', async () => {
   }
 });
 
-// ---- Slash command handler
+// ---- One interaction handler for everything
 client.on('interactionCreate', async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
-
-  if (interaction.commandName === 'change-password') {
-    if (!interaction.memberPermissions?.has(PermissionsBitField.Flags.ManageGuild)) {
-      return interaction.reply({ content: 'Missing permission: Manage Server.', ephemeral: true });
+  try {
+    // slash commands
+    if (interaction.isChatInputCommand()) {
+      if (interaction.commandName === 'change-password') {
+        if (!interaction.memberPermissions?.has(PermissionsBitField.Flags.ManageGuild)) {
+          return interaction.reply({ content: 'Missing permission: Manage Server.', ephemeral: true });
+        }
+        currentPassword = interaction.options.getString('password', true);
+        return interaction.reply({ content: `Password set to: \`${currentPassword}\`` });
+      }
+      return;
     }
-    currentPassword = interaction.options.getString('password', true);
-    return interaction.reply({ content: `Password set to: \`${currentPassword}\`` });
-  }
-});
 
-// ---- Buttons -> show modals for Roblox user / Discord ID
-client.on('interactionCreate', async (interaction) => {
-  if (!interaction.isButton()) return;
+    // buttons
+    if (interaction.isButton()) {
+      if (interaction.customId === 'ask_user') {
+        const modal = new ModalBuilder()
+          .setCustomId('modal_user')
+          .setTitle('Enter Roblox Username');
 
-  if (interaction.customId === 'ask_user') {
-    const modal = new ModalBuilder()
-      .setCustomId('modal_user')
-      .setTitle('Enter Roblox Username');
+        const input = new TextInputBuilder()
+          .setCustomId('roblox_username')
+          .setLabel('Roblox Username')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true);
 
-    const input = new TextInputBuilder()
-      .setCustomId('roblox_username')
-      .setLabel('Roblox Username')
-      .setStyle(TextInputStyle.Short)
-      .setRequired(true);
+        const row = new ActionRowBuilder().addComponents(input);
+        modal.addComponents(row);
+        return interaction.showModal(modal);
+      }
 
-    const row = new ActionRowBuilder().addComponents(input);
-    modal.addComponents(row);
-    return interaction.showModal(modal);
-  }
+      if (interaction.customId === 'ask_id') {
+        const modal = new ModalBuilder()
+          .setCustomId('modal_discordid')
+          .setTitle('Enter Discord ID');
 
-  if (interaction.customId === 'ask_id') {
-    const modal = new ModalBuilder()
-      .setCustomId('modal_discordid')
-      .setTitle('Enter Discord ID');
+        const input = new TextInputBuilder()
+          .setCustomId('discord_id')
+          .setLabel('Discord ID')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true);
 
-    const input = new TextInputBuilder()
-      .setCustomId('discord_id')
-      .setLabel('Discord ID')
-      .setStyle(TextInputStyle.Short)
-      .setRequired(true);
+        const row = new ActionRowBuilder().addComponents(input);
+        modal.addComponents(row);
+        return interaction.showModal(modal);
+      }
+      return;
+    }
 
-    const row = new ActionRowBuilder().addComponents(input);
-    modal.addComponents(row);
-    return interaction.showModal(modal);
-  }
-});
-
-// ---- Handle modal submissions
-client.on('interactionCreate', async (interaction) => {
-  if (interaction.type !== InteractionType.ModalSubmit) return;
-
-  if (interaction.customId === 'modal_user') {
-    const value = interaction.fields.getTextInputValue('roblox_username');
-    return interaction.reply({ content: `User: **${value}** (submitted by ${interaction.user.tag})` });
-  }
-
-  if (interaction.customId === 'modal_discordid') {
-    const value = interaction.fields.getTextInputValue('discord_id');
-    return interaction.reply({ content: `ID: **${value}** (submitted by ${interaction.user.tag})` });
+    // modal submits
+    if (interaction.type === InteractionType.ModalSubmit) {
+      if (interaction.customId === 'modal_user') {
+        const value = interaction.fields.getTextInputValue('roblox_username');
+        return interaction.reply({ content: `User: **${value}** (submitted by ${interaction.user.tag})` });
+      }
+      if (interaction.customId === 'modal_discordid') {
+        const value = interaction.fields.getTextInputValue('discord_id');
+        return interaction.reply({ content: `ID: **${value}** (submitted by ${interaction.user.tag})` });
+      }
+    }
+  } catch (err) {
+    console.error('interaction error', err);
+    if (interaction.isRepliable()) {
+      try { await interaction.reply({ content: 'Something broke.', ephemeral: true }); } catch {}
+    }
   }
 });
 
