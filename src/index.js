@@ -19,7 +19,6 @@ import {
 } from 'discord.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import fetch from 'node-fetch';
 
 // Fixed password channel per your request
 const PASSWORD_CHANNEL_ID = '1436407803462815855';
