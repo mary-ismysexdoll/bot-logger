@@ -1,182 +1,182 @@
-import 'dotenv/config';
-import express from 'express';
-import {
-  ActionRowBuilder,
+// index.js
+require('dotenv/config');
+
+const express = require('express');
+const {
+  Client,
+  GatewayIntentBits,
+  EmbedBuilder,
   ButtonBuilder,
   ButtonStyle,
-  Client,
-  EmbedBuilder,
-  Events,
-  GatewayIntentBits,
+  ActionRowBuilder,
+  PermissionsBitField,
+  REST,
+  Routes,
+  SlashCommandBuilder,
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
-} from 'discord.js';
+  InteractionType,
+} = require('discord.js');
 
 const {
   DISCORD_TOKEN,
   CHANNEL_ID,
-  PORT = 3000,
   INTAKE_AUTH,
+  DEFAULT_PASSWORD = 'letmein',
 } = process.env;
 
-if (!DISCORD_TOKEN || !CHANNEL_ID) {
-  console.error('Missing DISCORD_TOKEN or CHANNEL_ID in env.');
-  process.exit(1);
-}
+let currentPassword = DEFAULT_PASSWORD;
 
-const client = new Client({
-  intents: [GatewayIntentBits.Guilds],
-});
-
-client.once(Events.ClientReady, (c) => {
-  console.log(`Logged in as ${c.user.tag}`);
-});
-
-/** Builds the intake embed + buttons */
-function buildIntake(deviceUser, deviceId) {
-  const embed = new EmbedBuilder()
-    .setTitle('Checker Intake')
-    .setColor(0xFFD700) // gold-ish
-    .addFields(
-      { name: 'Device Username', value: String(deviceUser || 'unknown'), inline: false },
-      { name: 'Device ID', value: String(deviceId || 'unknown'), inline: false },
-    )
-    .setTimestamp(new Date());
-
-  const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId('btn_user_modal')
-      .setLabel('User')
-      .setStyle(ButtonStyle.Secondary)
-      .setEmoji('🟡'),
-    new ButtonBuilder()
-      .setCustomId('btn_id_modal')
-      .setLabel('ID')
-      .setStyle(ButtonStyle.Secondary)
-      .setEmoji('⚪'),
-  );
-
-  return { embed, row };
-}
-
-/** HTTP server to receive posts from the PowerShell script */
 const app = express();
 app.use(express.json());
 
+// ---- REST: intake (from your PowerShell launcher)
 app.post('/intake', async (req, res) => {
   try {
-    // simple shared-secret header (optional but recommended)
-    if (INTAKE_AUTH) {
-      const auth = req.header('X-Auth');
-      if (auth !== INTAKE_AUTH) {
-        return res.status(401).json({ ok: false, error: 'unauthorized' });
-        }
+    if (req.header('X-Auth') !== INTAKE_AUTH) {
+      return res.status(401).json({ status: 'error', code: 'unauthorized' });
     }
-
     const { deviceUser, deviceId } = req.body || {};
     if (!deviceUser || !deviceId) {
-      return res.status(400).json({ ok: false, error: 'deviceUser and deviceId required' });
+      return res.status(400).json({ status: 'error', code: 'bad_body' });
     }
+
+    const embed = new EmbedBuilder()
+      .setTitle('Checker Intake')
+      .addFields(
+        { name: 'Device User', value: String(deviceUser), inline: false },
+        { name: 'Device ID', value: String(deviceId), inline: false },
+      )
+      .setTimestamp(new Date());
+
+    const gold = new ButtonBuilder()
+      .setCustomId('ask_user')
+      .setLabel('User')
+      .setStyle(ButtonStyle.Primary);
+
+    const silver = new ButtonBuilder()
+      .setCustomId('ask_id')
+      .setLabel('ID')
+      .setStyle(ButtonStyle.Secondary);
+
+    const row = new ActionRowBuilder().addComponents(gold, silver);
 
     const channel = await client.channels.fetch(CHANNEL_ID);
-    if (!channel || !channel.isTextBased()) {
-      return res.status(500).json({ ok: false, error: 'CHANNEL_ID is not a text channel' });
-    }
+    await channel.send({ embeds: [embed], components: [row] });
 
-    const { embed, row } = buildIntake(deviceUser, deviceId);
-    const msg = await channel.send({ embeds: [embed], components: [row] });
-
-    return res.json({ ok: true, messageId: msg.id });
+    return res.json({ ok: true });
   } catch (e) {
-    console.error(e);
-    return res.status(500).json({ ok: false, error: 'internal' });
+    console.error('intake error', e);
+    return res.status(500).json({ status: 'error' });
   }
 });
 
-/** Handle button clicks -> open modals; handle modal submits -> edit the embed */
-client.on(Events.InteractionCreate, async (interaction) => {
+// ---- REST: read current password (used by launcher)
+app.get('/password', (req, res) => {
+  if (req.header('X-Auth') !== INTAKE_AUTH) {
+    return res.status(401).json({ status: 'error', code: 'unauthorized' });
+  }
+  return res.json({ password: currentPassword });
+});
+
+// ---- Health
+app.get('/health', (_req, res) => res.json({ ok: true }));
+
+// ---- Discord client
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+
+client.once('ready', async () => {
   try {
-    // Buttons -> show modals
-    if (interaction.isButton()) {
-      if (interaction.customId === 'btn_user_modal') {
-        const modal = new ModalBuilder()
-          .setCustomId('user_modal')
-          .setTitle('Enter Roblox Username');
+    const commands = [
+      new SlashCommandBuilder()
+        .setName('change-password')
+        .setDescription('Set the launcher password (stored in bot memory).')
+        .addStringOption(o =>
+          o.setName('password').setDescription('New password').setRequired(true),
+        )
+        .toJSON(),
+    ];
 
-        const input = new TextInputBuilder()
-          .setCustomId('roblox_username')
-          .setLabel('Roblox Username')
-          .setStyle(TextInputStyle.Short)
-          .setRequired(true)
-          .setMaxLength(32);
+    const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
+    // Register globally
+    await rest.put(
+      Routes.applicationCommands(client.user.id),
+      { body: commands },
+    );
 
-        const row = new ActionRowBuilder().addComponents(input);
-        modal.addComponents(row);
-        return interaction.showModal(modal);
-      }
-
-      if (interaction.customId === 'btn_id_modal') {
-        const modal = new ModalBuilder()
-          .setCustomId('discordid_modal')
-          .setTitle('Enter Discord ID');
-
-        const input = new TextInputBuilder()
-          .setCustomId('discord_id')
-          .setLabel('Discord ID')
-          .setStyle(TextInputStyle.Short)
-          .setRequired(true)
-          .setMaxLength(25);
-
-        const row = new ActionRowBuilder().addComponents(input);
-        modal.addComponents(row);
-        return interaction.showModal(modal);
-      }
-      return;
-    }
-
-    // Modals -> update the message embed
-    if (interaction.isModalSubmit()) {
-      const msg = interaction.message; // original message with the embed/buttons
-      if (!msg) {
-        await interaction.reply({ content: 'Could not locate the message.', ephemeral: true });
-        return;
-      }
-
-      const original = msg.embeds?.[0];
-      if (!original) {
-        await interaction.reply({ content: 'No embed to update.', ephemeral: true });
-        return;
-      }
-
-      // Rebuild the embed from the original and append new field
-      const updated = EmbedBuilder.from(original);
-
-      if (interaction.customId === 'user_modal') {
-        const roblox = interaction.fields.getTextInputValue('roblox_username').trim();
-        updated.addFields({ name: 'Roblox User', value: roblox || 'n/a', inline: false });
-        await msg.edit({ embeds: [updated] });
-        await interaction.reply({ content: 'Roblox username saved.', ephemeral: true });
-        return;
-      }
-
-      if (interaction.customId === 'discordid_modal') {
-        const discId = interaction.fields.getTextInputValue('discord_id').trim();
-        updated.addFields({ name: 'Discord ID', value: discId || 'n/a', inline: false });
-        await msg.edit({ embeds: [updated] });
-        await interaction.reply({ content: 'Discord ID saved.', ephemeral: true });
-        return;
-      }
-    }
+    console.log('Bot ready. Current password:', currentPassword);
   } catch (err) {
-    console.error(err);
-    if (interaction.isRepliable()) {
-      await interaction.reply({ content: 'Something went wrong.', ephemeral: true }).catch(() => {});
-    }
+    console.error('Command registration failed:', err);
   }
 });
 
-client.login(DISCORD_TOKEN);
-app.listen(Number(PORT), () => {
-  console.log(`HTTP intake listening on :${PORT}`);
+// ---- Slash command handler
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+
+  if (interaction.commandName === 'change-password') {
+    if (!interaction.memberPermissions?.has(PermissionsBitField.Flags.ManageGuild)) {
+      return interaction.reply({ content: 'Missing permission: Manage Server.', ephemeral: true });
+    }
+    currentPassword = interaction.options.getString('password', true);
+    return interaction.reply({ content: `Password set to: \`${currentPassword}\`` });
+  }
 });
+
+// ---- Buttons -> show modals for Roblox user / Discord ID
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isButton()) return;
+
+  if (interaction.customId === 'ask_user') {
+    const modal = new ModalBuilder()
+      .setCustomId('modal_user')
+      .setTitle('Enter Roblox Username');
+
+    const input = new TextInputBuilder()
+      .setCustomId('roblox_username')
+      .setLabel('Roblox Username')
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true);
+
+    const row = new ActionRowBuilder().addComponents(input);
+    modal.addComponents(row);
+    return interaction.showModal(modal);
+  }
+
+  if (interaction.customId === 'ask_id') {
+    const modal = new ModalBuilder()
+      .setCustomId('modal_discordid')
+      .setTitle('Enter Discord ID');
+
+    const input = new TextInputBuilder()
+      .setCustomId('discord_id')
+      .setLabel('Discord ID')
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true);
+
+    const row = new ActionRowBuilder().addComponents(input);
+    modal.addComponents(row);
+    return interaction.showModal(modal);
+  }
+});
+
+// ---- Handle modal submissions
+client.on('interactionCreate', async (interaction) => {
+  if (interaction.type !== InteractionType.ModalSubmit) return;
+
+  if (interaction.customId === 'modal_user') {
+    const value = interaction.fields.getTextInputValue('roblox_username');
+    return interaction.reply({ content: `User: **${value}** (submitted by ${interaction.user.tag})` });
+  }
+
+  if (interaction.customId === 'modal_discordid') {
+    const value = interaction.fields.getTextInputValue('discord_id');
+    return interaction.reply({ content: `ID: **${value}** (submitted by ${interaction.user.tag})` });
+  }
+});
+
+// ---- Start web + login bot
+const port = process.env.PORT || 3000;
+app.listen(port, () => console.log(`HTTP intake listening on :${port}`));
+client.login(DISCORD_TOKEN);
