@@ -1,4 +1,4 @@
-// index.js (ESM)
+// ----- src/index.js (ESM) -----
 import 'dotenv/config';
 import express from 'express';
 import {
@@ -72,14 +72,13 @@ async function readPasswordFromChannel() {
   );
 
   if (!msg) {
-    // If nothing exists yet, create it with currentPassword
     await ensurePasswordMessage();
     return currentPassword;
   }
   const m = /`([^`]+)`/.exec(msg.content);
   const pw = m ? m[1] : msg.content.slice(PASSWORD_PREFIX.length).trim().replace(/^`|`$/g, '');
-  currentPassword = pw.trim();
-  return currentPassword;
+  currentPassword = pw;
+  return pw;
 }
 
 async function registerCommands() {
@@ -102,21 +101,9 @@ async function registerCommands() {
 
 const onReady = async () => {
   console.log(`Logged in as ${client.user.tag}`);
-  try {
-    await registerCommands();
-  } catch (err) {
-    console.error('Command registration failed:', err);
-  }
-  try {
-    // Seed the channel message with DEFAULT_PASSWORD on boot (or keep the existing one)
-    await ensurePasswordMessage();
-  } catch (err) {
-    console.error('ensurePasswordMessage on ready failed:', err);
-  }
-  // Periodic reconciliation
-  setInterval(() => {
-    ensurePasswordMessage().catch(() => {});
-  }, 120_000);
+  try { await registerCommands(); } catch (err) { console.error('Command registration failed:', err); }
+  try { await ensurePasswordMessage(); } catch (err) { console.error('ensurePasswordMessage on ready failed:', err); }
+  setInterval(() => { ensurePasswordMessage().catch(() => {}); }, 120_000);
 };
 
 // Support both current and upcoming event name
@@ -137,7 +124,7 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-// Buttons → modals (unchanged)
+// Buttons → modals
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isButton()) return;
 
@@ -190,8 +177,7 @@ app.get('/password', async (req, res) => {
     if (!client.user) {
       return res.status(503).json({ status: 'error', code: 'bot_not_ready' });
     }
-    const pw = (await readPasswordFromChannel()).trim();
-    res.set('Cache-Control', 'no-store'); // avoid any proxy/browser caching
+    const pw = await readPasswordFromChannel();
     return res.json({ password: pw });
   } catch (e) {
     console.error('GET /password error:', e);
