@@ -20,41 +20,39 @@ import {
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-// Fixed password channel per your request
-const PASSWORD_CHANNEL_ID = '1436407803462815855';
+// -------------------- Config --------------------
+const PASSWORD_CHANNEL_ID = '1436407803462815855'; // fixed channel for GUI password
 
 const {
   DISCORD_TOKEN,
   INTAKE_AUTH,
   DEFAULT_PASSWORD = 'letmein',
-  // Intake channel defaults to same; can override via env if needed
-  CHANNEL_ID = PASSWORD_CHANNEL_ID,
-  GUILD_ID,
+  CHANNEL_ID = PASSWORD_CHANNEL_ID, // intake posts channel (override via env)
+  GUILD_ID,                         // strongly recommended for instant command updates
   PORT = 8080,
 } = process.env;
 
+// -------------------- Express -------------------
 const app = express();
 app.use(express.json());
 
+// ---------------- Password sync message ---------
 let currentPassword = DEFAULT_PASSWORD;
 const PASSWORD_PREFIX = 'GUI PASSWORD:';
 
-// ---------- Simple JSON DB ----------
+// ---------------- Simple JSON "DB" --------------
 const DATA_DIR = path.join(process.cwd(), 'data');
 const DB_FILE = path.join(DATA_DIR, 'db.json');
 
 /**
- * DB shape:
+ * Shape:
  * {
  *   records: [
  *     {
- *       ts: ISO,
- *       deviceUser: string,
- *       deviceId: string,
- *       country?: string, region?: string, city?: string,
- *       username?: string,           // Roblox username if known
- *       discordId?: string,          // optional from modal
- *       messageId?: string           // Discord message id of the intake embed
+ *       ts, deviceUser, deviceId,
+ *       country?, region?, city?,
+ *       username?, discordId?,
+ *       messageId?
  *     }
  *   ],
  *   messageIndex: { [messageId]: recordIndex }
@@ -68,21 +66,16 @@ async function loadDB() {
     if (!parsed.records) parsed.records = [];
     if (!parsed.messageIndex) parsed.messageIndex = {};
     return parsed;
-  } catch (e) {
+  } catch {
     return { records: [], messageIndex: {} };
   }
 }
 async function saveDB(db) {
   await fs.writeFile(DB_FILE, JSON.stringify(db, null, 2), 'utf8');
 }
-
-function norm(s) {
-  return (s ?? '').toString().trim();
-}
-function sameLoc(a) {
-  // key for dedupe
-  return [norm(a.city), norm(a.region), norm(a.country)].join('|').toLowerCase();
-}
+const norm = (s) => (s ?? '').toString().trim();
+const sameLoc = (a) =>
+  [norm(a.city), norm(a.region), norm(a.country)].join('|').toLowerCase();
 
 async function recordIntakeAndLinkMessage(payload, messageId) {
   const db = await loadDB();
@@ -104,20 +97,17 @@ async function recordIntakeAndLinkMessage(payload, messageId) {
 async function upsertUsernameFromModal(messageId, username, discordIdOpt) {
   const db = await loadDB();
   const idx = db.messageIndex[messageId];
-  if (idx === undefined) {
-    // Fallback: try to patch by reading the message’s embed later (handled in handler).
-    return;
-  }
+  if (idx === undefined) return;
+
   const base = db.records[idx];
   const deviceId = base.deviceId;
   const uname = norm(username);
   const discordId = norm(discordIdOpt);
 
-  // Set on this record
-  base.username = uname || base.username;
+  if (uname) base.username = uname;
   if (discordId) base.discordId = discordId;
 
-  // Normalize across same deviceId
+  // normalize to all records with same deviceId
   for (const r of db.records) {
     if (r.deviceId && r.deviceId === deviceId) {
       if (uname) r.username = uname;
@@ -142,10 +132,8 @@ function filterRecords(db, field, value) {
     if (by === 'deviceid') return di.includes(needle);
     if (by === 'deviceuser') return du.includes(needle);
     if (by === 'location') return inLoc(r);
-    // any
-    return (
-      u.includes(needle) || du.includes(needle) || di.includes(needle) || inLoc(r)
-    );
+    // default shouldn't happen because we removed "any"
+    return u.includes(needle) || du.includes(needle) || di.includes(needle) || inLoc(r);
   });
 }
 
@@ -153,7 +141,7 @@ function aggregate(records) {
   const deviceIds = new Set();
   const deviceUsers = new Set();
   const times = new Set();
-  const locKeys = new Map(); // key -> pretty string
+  const locKeys = new Map(); // key -> pretty
 
   let avatarName = null;
 
@@ -161,6 +149,7 @@ function aggregate(records) {
     if (r.deviceId) deviceIds.add(r.deviceId);
     if (r.deviceUser) deviceUsers.add(r.deviceUser);
     if (r.ts) times.add(r.ts);
+
     const city = norm(r.city);
     const region = norm(r.region);
     const country = norm(r.country);
@@ -175,7 +164,7 @@ function aggregate(records) {
   return {
     deviceIds: [...deviceIds],
     deviceUsers: [...deviceUsers],
-    timestamps: [...times].sort(), // ISO asc
+    timestamps: [...times].sort(),
     locations: [...locKeys.values()],
     avatarName,
   };
@@ -197,8 +186,7 @@ async function fetchRobloxHeadshot(username) {
       body: JSON.stringify({ usernames: [username], excludeBannedUsers: true }),
     });
     const uJson = await uRes.json();
-    const user = uJson?.data?.[0];
-    const userId = user?.id;
+    const userId = uJson?.data?.[0]?.id;
     if (!userId) return null;
 
     // 2) headshot
@@ -206,18 +194,17 @@ async function fetchRobloxHeadshot(username) {
       `https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=${userId}&size=150x150&format=Png`,
     );
     const tJson = await tRes.json();
-    const url = tJson?.data?.[0]?.imageUrl || null;
-    return url;
+    return tJson?.data?.[0]?.imageUrl || null;
   } catch {
     return null;
   }
 }
 
-// ---------- Discord client ----------
+// ---------------- Discord client ----------------
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages, // to fetch messages/embeds
+    GatewayIntentBits.GuildMessages, // for fetching messages/embeds by id
   ],
 });
 
@@ -281,7 +268,7 @@ async function readPasswordFromChannel() {
   return pw;
 }
 
-// ---------- Slash commands ----------
+// ---------------- Slash Commands ----------------
 async function registerCommands() {
   const commands = [
     new SlashCommandBuilder()
@@ -301,7 +288,6 @@ async function registerCommands() {
           .setDescription('What to search')
           .setRequired(true)
           .addChoices(
-            { name: 'any', value: 'any' },
             { name: 'username', value: 'username' },
             { name: 'deviceId', value: 'deviceid' },
             { name: 'deviceUser', value: 'deviceuser' },
@@ -315,18 +301,19 @@ async function registerCommands() {
   ];
 
   const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
+  const appId = client.user.id;
+
+  // Clear ALL global commands so stale variants (e.g., with "any") disappear
+  await rest.put(Routes.applicationCommands(appId), { body: [] });
 
   if (GUILD_ID) {
-    await rest.put(
-      Routes.applicationGuildCommands(client.user.id, GUILD_ID),
-      { body: commands },
-    );
-    console.log('Registered GUILD commands (instant).');
+    // Register to guild for instant updates
+    await rest.put(Routes.applicationGuildCommands(appId, GUILD_ID), { body: commands });
+    console.log('Registered GUILD commands and cleared GLOBAL.');
   } else {
-    await rest.put(Routes.applicationCommands(client.user.id), {
-      body: commands,
-    });
-    console.log('Registered GLOBAL commands (may take time).');
+    // If you truly want global commands:
+    await rest.put(Routes.applicationCommands(appId), { body: commands });
+    console.log('Registered GLOBAL commands (may take time to propagate).');
   }
 }
 
@@ -344,16 +331,16 @@ const onReady = async () => {
     console.error('ensurePasswordMessage on ready failed:', err);
   }
 
+  // Periodically reconcile the password message
   setInterval(() => {
     ensurePasswordMessage().catch(() => {});
   }, 120_000);
 };
 
-// Support both names (deprecation-safe)
 client.once('ready', onReady);
 client.once('clientReady', onReady);
 
-// Slash command handler
+// --------- Slash command handler ----------
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
@@ -372,7 +359,9 @@ client.on('interactionCreate', async (interaction) => {
   if (interaction.commandName === 'search') {
     const field = interaction.options.getString('field', true);
     const value = interaction.options.getString('value', true);
-    await interaction.deferReply({ ephemeral: true });
+
+    // Make the FIRST reply non-ephemeral so everyone can see it
+    await interaction.deferReply({ ephemeral: false });
 
     const db = await loadDB();
     const results = filterRecords(db, field, value);
@@ -381,7 +370,6 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.editReply('No matching records.');
     }
 
-    // Aggregate + avatar
     const agg = aggregate(results);
     const deviceIds = truncateList(agg.deviceIds, 10);
     const deviceUsers = truncateList(agg.deviceUsers, 10);
@@ -396,7 +384,7 @@ client.on('interactionCreate', async (interaction) => {
       .addFields(
         { name: 'Device IDs', value: deviceIds.length ? deviceIds.join('\n') : '—', inline: false },
         { name: 'Device Users', value: deviceUsers.length ? deviceUsers.join('\n') : '—', inline: false },
-        { name: 'Locations', value: locations.length ? locations.join('\n') : '—', inline: false },
+        { name: 'Locations (deduped)', value: locations.length ? locations.join('\n') : '—', inline: false },
         { name: 'All Log Timestamps', value: times.length ? times.join('\n') : '—', inline: false },
       )
       .setTimestamp(new Date());
@@ -408,7 +396,7 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-// ---------- Button → Modal (with message id) ----------
+// ------ Button → Modal (with message id) ------
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isButton()) return;
 
@@ -450,7 +438,7 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-// ---------- Modal submissions → edit original embed + persist ----------
+// -- Modal submissions → edit embed + persist --
 client.on('interactionCreate', async (interaction) => {
   if (interaction.type !== InteractionType.ModalSubmit) return;
 
@@ -478,19 +466,13 @@ client.on('interactionCreate', async (interaction) => {
 
       await msg.edit({ embeds: [embed], components: msg.components });
 
-      // persist
+      // persist + propagate to same deviceId
       await upsertUsernameFromModal(messageId, value);
 
-      return interaction.reply({
-        content: 'Added username to the intake embed.',
-        ephemeral: true,
-      });
+      return interaction.reply({ content: 'Username saved.', ephemeral: true });
     } catch (err) {
       console.error('modal_user edit error:', err);
-      return interaction.reply({
-        content: 'Failed to update message.',
-        ephemeral: true,
-      });
+      return interaction.reply({ content: 'Failed to update.', ephemeral: true });
     }
   }
 
@@ -518,24 +500,18 @@ client.on('interactionCreate', async (interaction) => {
 
       await msg.edit({ embeds: [embed], components: msg.components });
 
-      // persist (also normalize across deviceId cluster)
-      await upsertUsernameFromModal(messageId, /*username*/ null, value);
+      // persist + propagate to same deviceId
+      await upsertUsernameFromModal(messageId, /* username */ null, value);
 
-      return interaction.reply({
-        content: 'Added Discord ID to the intake embed.',
-        ephemeral: true,
-      });
+      return interaction.reply({ content: 'Discord ID saved.', ephemeral: true });
     } catch (err) {
       console.error('modal_discordid edit error:', err);
-      return interaction.reply({
-        content: 'Failed to update message.',
-        ephemeral: true,
-      });
+      return interaction.reply({ content: 'Failed to update.', ephemeral: true });
     }
   }
 });
 
-// ---------- HTTP routes ----------
+// -------------------- HTTP routes --------------------
 app.get('/password', async (req, res) => {
   try {
     if (req.header('X-Auth') !== INTAKE_AUTH) {
@@ -558,14 +534,7 @@ app.post('/intake', async (req, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const {
-      deviceUser,
-      deviceId,
-      country,
-      region,
-      city,
-    } = req.body || {};
-
+    const { deviceUser, deviceId, country, region, city } = req.body || {};
     if (!deviceUser || !deviceId) {
       return res.status(400).json({ error: 'Missing deviceUser or deviceId' });
     }
@@ -580,18 +549,25 @@ app.post('/intake', async (req, res) => {
 
     const loc = [];
     if (country) loc.push(`**Country:** ${country}`);
-    if (region)  loc.push(`**Region:** ${region}`);
-    if (city)    loc.push(`**City:** ${city}`);
+    if (region) loc.push(`**Region:** ${region}`);
+    if (city) loc.push(`**City:** ${city}`);
     if (loc.length) embed.addFields({ name: 'Approx. Location', value: loc.join('\n'), inline: false });
 
-    const userBtn = new ButtonBuilder().setCustomId('ask_user').setLabel('User').setStyle(ButtonStyle.Primary);
-    const idBtn = new ButtonBuilder().setCustomId('ask_id').setLabel('ID').setStyle(ButtonStyle.Secondary);
+    const userBtn = new ButtonBuilder()
+      .setCustomId('ask_user')
+      .setLabel('User')
+      .setStyle(ButtonStyle.Primary);
+
+    const idBtn = new ButtonBuilder()
+      .setCustomId('ask_id')
+      .setLabel('ID')
+      .setStyle(ButtonStyle.Secondary);
+
     const row = new ActionRowBuilder().addComponents(userBtn, idBtn);
 
     const channel = await client.channels.fetch(CHANNEL_ID);
     const sent = await channel.send({ embeds: [embed], components: [row] });
 
-    // persist
     await recordIntakeAndLinkMessage(
       { deviceUser, deviceId, country, region, city },
       sent.id,
@@ -606,7 +582,7 @@ app.post('/intake', async (req, res) => {
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
-// ---------- Start ----------
+// -------------------- Start --------------------
 app.listen(PORT, () => console.log(`HTTP listening on :${PORT}`));
 client.login(DISCORD_TOKEN);
 
