@@ -384,8 +384,8 @@ client.on('interactionCreate', async (interaction) => {
       .addFields(
         { name: 'Device IDs', value: deviceIds.length ? deviceIds.join('\n') : '—', inline: false },
         { name: 'Device Users', value: deviceUsers.length ? deviceUsers.join('\n') : '—', inline: false },
-        { name: 'Locations (deduped)', value: locations.length ? locations.join('\n') : '—', inline: false },
-        { name: 'All Log Timestamps', value: times.length ? times.join('\n') : '—', inline: false },
+        { name: 'Locations', value: locations.length ? locations.join('\n') : '—', inline: false },
+        { name: 'Timestamps', value: times.length ? times.join('\n') : '—', inline: false },
       )
       .setTimestamp(new Date());
 
@@ -454,7 +454,7 @@ client.on('interactionCreate', async (interaction) => {
       const [origEmbed] = msg.embeds;
       const embed = origEmbed
         ? EmbedBuilder.from(origEmbed)
-        : new EmbedBuilder().setTitle('Checker Intake');
+        : new EmbedBuilder().setTitle('Player Database Log');
 
       const fields = embed.data.fields ?? [];
       const label = 'Roblox Username';
@@ -488,7 +488,7 @@ client.on('interactionCreate', async (interaction) => {
       const [origEmbed] = msg.embeds;
       const embed = origEmbed
         ? EmbedBuilder.from(origEmbed)
-        : new EmbedBuilder().setTitle('Checker Intake');
+        : new EmbedBuilder().setTitle('Player Database Log');
 
       const fields = embed.data.fields ?? [];
       const label = 'Discord ID';
@@ -540,7 +540,7 @@ app.post('/intake', async (req, res) => {
     }
 
     const embed = new EmbedBuilder()
-      .setTitle('Checker Intake')
+      .setTitle('Player Database Log')
       .addFields(
         { name: 'Device User', value: String(deviceUser), inline: false },
         { name: 'Device ID', value: String(deviceId), inline: false },
