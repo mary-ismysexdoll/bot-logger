@@ -342,11 +342,19 @@ app.get('/password', async (req, res) => {
 app.post('/intake', async (req, res) => {
   try {
     if (req.header('X-Auth') !== INTAKE_AUTH) {
-      return res.status(401).json({ status: 'error', code: 'unauthorized' });
+      return res.status(401).json({ error: 'Unauthorized' });
     }
-    const { deviceUser, deviceId } = req.body || {};
+
+    const {
+      deviceUser,
+      deviceId,
+      country,
+      region,
+      city
+    } = req.body || {};
+
     if (!deviceUser || !deviceId) {
-      return res.status(400).json({ status: 'error', code: 'bad_body' });
+      return res.status(400).json({ error: 'Missing deviceUser or deviceId' });
     }
 
     const embed = new EmbedBuilder()
@@ -356,6 +364,20 @@ app.post('/intake', async (req, res) => {
         { name: 'Device ID', value: String(deviceId), inline: false },
       )
       .setTimestamp(new Date());
+
+    // Only add location fields if present
+    const locationLines = [];
+    if (country) locationLines.push(`**Country:** ${country}`);
+    if (region)  locationLines.push(`**Region:** ${region}`);
+    if (city)    locationLines.push(`**City:** ${city}`);
+
+    if (locationLines.length) {
+      embed.addFields({
+        name: 'Approx. Location',
+        value: locationLines.join('\n'),
+        inline: false
+      });
+    }
 
     const userBtn = new ButtonBuilder()
       .setCustomId('ask_user')
@@ -373,11 +395,12 @@ app.post('/intake', async (req, res) => {
     await channel.send({ embeds: [embed], components: [row] });
 
     return res.json({ ok: true });
-  } catch (e) {
-    console.error('POST /intake error:', e);
-    return res.status(500).json({ status: 'error' });
+  } catch (err) {
+    console.error('Intake error:', err);
+    return res.status(500).json({ error: 'Internal error' });
   }
 });
+
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
