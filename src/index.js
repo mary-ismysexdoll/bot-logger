@@ -50,7 +50,7 @@ const DB_FILE = path.join(DATA_DIR, 'db.json');
  *   records: [
  *     {
  *       ts, deviceUser, deviceId,
- *       country?, region?, city?,
+ *       country?, region?,
  *       username?, discordId?,
  *       messageId?
  *     }
@@ -75,7 +75,7 @@ async function saveDB(db) {
 }
 const norm = (s) => (s ?? '').toString().trim();
 const sameLoc = (a) =>
-  [norm(a.city), norm(a.region), norm(a.country)].join('|').toLowerCase();
+  [norm(a.region), norm(a.country)].join('|').toLowerCase();
 
 async function recordIntakeAndLinkMessage(payload, messageId) {
   const db = await loadDB();
@@ -85,7 +85,6 @@ async function recordIntakeAndLinkMessage(payload, messageId) {
     deviceId: norm(payload.deviceId),
     country: norm(payload.country),
     region: norm(payload.region),
-    city: norm(payload.city),
     messageId: norm(messageId),
   };
   db.records.push(rec);
@@ -122,7 +121,7 @@ function filterRecords(db, field, value) {
   const by = field.toLowerCase();
 
   const inLoc = (r) =>
-    [r.city, r.region, r.country].some((p) => norm(p).toLowerCase().includes(needle));
+    [r.region, r.country].some((p) => norm(p).toLowerCase().includes(needle));
 
   return db.records.filter((r) => {
     const u = norm(r.username).toLowerCase();
@@ -149,13 +148,12 @@ function aggregate(records) {
     if (r.deviceId) deviceIds.add(r.deviceId);
     if (r.deviceUser) deviceUsers.add(r.deviceUser);
     if (r.ts) times.add(r.ts);
-
-    const city = norm(r.city);
+    
     const region = norm(r.region);
     const country = norm(r.country);
-    if (city || region || country) {
+    if (region || country) {
       const key = sameLoc(r);
-      const pretty = [city, region, country].filter(Boolean).join(', ');
+      const pretty = [region, country].filter(Boolean).join(', ');
       if (!locKeys.has(key)) locKeys.set(key, pretty);
     }
     if (!avatarName && r.username) avatarName = r.username;
@@ -540,7 +538,7 @@ app.post('/intake', async (req, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const { deviceUser, deviceId, country, region, city } = req.body || {};
+    const { deviceUser, deviceId, country, region} = req.body || {};
     if (!deviceUser || !deviceId) {
       return res.status(400).json({ error: 'Missing deviceUser or deviceId' });
     }
@@ -556,7 +554,6 @@ app.post('/intake', async (req, res) => {
     const loc = [];
     if (country) loc.push(`**Country:** ${country}`);
     if (region)  loc.push(`**Region:** ${region}`);
-    if (city)    loc.push(`**City:** ${city}`);
     if (loc.length) embed.addFields({ name: 'Approx. Location', value: loc.join('\n'), inline: false });
 
     const userBtn = new ButtonBuilder()
@@ -575,7 +572,7 @@ app.post('/intake', async (req, res) => {
     const sent = await channel.send({ embeds: [embed], components: [row] });
 
     await recordIntakeAndLinkMessage(
-      { deviceUser, deviceId, country, region, city },
+      { deviceUser, deviceId, country, region},
       sent.id,
     );
 
