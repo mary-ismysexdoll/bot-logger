@@ -23,21 +23,21 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 // -------------------- Config --------------------
-const PASSWORD_CHANNEL_ID = '1436407803462815855'; // fixed channel for GUI password
-const LOGTEXT_CHANNEL_ID  = process.env.LOGTEXT_CHANNEL_ID || '1437264338703618129'; // target for raw log box text
+const PASSWORD_CHANNEL_ID = '1436407803462815855';                                  // GUI password post
+const LOGTEXT_CHANNEL_ID  = process.env.LOGTEXT_CHANNEL_ID || '1437264338703618129';// RAW log text target
+const INTAKE_CHANNEL_ID   = process.env.INTAKE_CHANNEL_ID  || PASSWORD_CHANNEL_ID;  // Player DB embeds
 
 const {
   DISCORD_TOKEN,
   INTAKE_AUTH,
   DEFAULT_PASSWORD = 'letmein',
-  CHANNEL_ID = PASSWORD_CHANNEL_ID, // intake-embed posts channel (override via env)
-  GUILD_ID,                         // recommended for instant command updates
+  GUILD_ID,
   PORT = 8080,
 } = process.env;
 
 // -------------------- Express -------------------
 const app = express();
-app.use(express.json({ limit: '3mb' }));
+app.use(express.json({ limit: '4mb' }));
 
 // ---------------- Password sync message ---------
 let currentPassword = DEFAULT_PASSWORD;
@@ -47,20 +47,6 @@ const PASSWORD_PREFIX = 'GUI PASSWORD:';
 const DATA_DIR = path.join(process.cwd(), 'data');
 const DB_FILE = path.join(DATA_DIR, 'db.json');
 
-/**
- * Shape:
- * {
- *   records: [
- *     {
- *       ts, deviceUser, deviceId,
- *       country?, region?,
- *       username?, discordId?,
- *       messageId?
- *     }
- *   ],
- *   messageIndex: { [messageId]: recordIndex }
- * }
- */
 async function loadDB() {
   try {
     await fs.mkdir(DATA_DIR, { recursive: true });
@@ -77,8 +63,7 @@ async function saveDB(db) {
   await fs.writeFile(DB_FILE, JSON.stringify(db, null, 2), 'utf8');
 }
 const norm = (s) => (s ?? '').toString().trim();
-const sameLoc = (a) =>
-  [norm(a.region), norm(a.country)].join('|').toLowerCase();
+const sameLoc = (a) => [norm(a.region), norm(a.country)].join('|').toLowerCase();
 
 async function recordIntakeAndLinkMessage(payload, messageId) {
   const db = await loadDB();
@@ -109,7 +94,6 @@ async function upsertUsernameFromModal(messageId, username, discordIdOpt) {
   if (uname) base.username = uname;
   if (discordId) base.discordId = discordId;
 
-  // normalize to all records with same deviceId
   for (const r of db.records) {
     if (r.deviceId && r.deviceId === deviceId) {
       if (uname) r.username = uname;
@@ -122,7 +106,6 @@ async function upsertUsernameFromModal(messageId, username, discordIdOpt) {
 function filterRecords(db, field, value) {
   const needle = norm(value).toLowerCase();
   const by = field.toLowerCase();
-
   const inLoc = (r) =>
     [r.region, r.country].some((p) => norm(p).toLowerCase().includes(needle));
 
@@ -142,8 +125,7 @@ function aggregate(records) {
   const deviceIds = new Set();
   const deviceUsers = new Set();
   const times = new Set();
-  const locKeys = new Map(); // key -> pretty
-
+  const locKeys = new Map();
   let avatarName = null;
 
   for (const r of records) {
@@ -176,16 +158,14 @@ function truncateList(arr, max = 10) {
   return [...arr.slice(0, max), `… (+${more} more)`];
 }
 
-// fetch polyfill (works on Node 18+ and older with node-fetch fallback)
+// fetch polyfill
 const doFetch = (...args) =>
-  (globalThis.fetch
-    ? globalThis.fetch(...args)
-    : import('node-fetch').then((m) => m.default(...args)));
+  (globalThis.fetch ? globalThis.fetch(...args)
+   : import('node-fetch').then((m) => m.default(...args)));
 
 async function fetchRobloxHeadshot(username) {
   if (!username) return null;
   try {
-    // 1) username -> userId
     const uRes = await doFetch('https://users.roblox.com/v1/usernames/users', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -195,7 +175,6 @@ async function fetchRobloxHeadshot(username) {
     const userId = uJson?.data?.[0]?.id;
     if (!userId) return null;
 
-    // 2) headshot
     const tRes = await doFetch(
       `https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=${userId}&size=150x150&format=Png`,
     );
@@ -240,7 +219,10 @@ async function ensurePasswordMessage() {
       await keeper.edit(desired).catch(() => {});
     }
   } else {
-    keeper = await channel.send(`${PASSWORD_PREFIX} \`${currentPassword}\``);
+    keeper = await channel.send({
+      content: `${PASSWORD_PREFIX} \`${currentPassword}\``,
+      allowedMentions: { parse: [] },
+    });
   }
 
   return keeper;
@@ -306,9 +288,10 @@ async function registerCommands() {
   const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
   const appId = client.user.id;
 
-  await rest.put(Routes.applicationCommands(appId), { body: [] }); // clear GLOBAL
+  // Clear and register (prefer guild for instant updates)
+  await rest.put(Routes.applicationCommands(appId), { body: [] });
   if (GUILD_ID) {
-    await rest.put(Routes.applicationGuildCommands(appId, GUILD_ID), { body: [] }); // clear GUILD
+    await rest.put(Routes.applicationGuildCommands(appId, GUILD_ID), { body: [] });
     await rest.put(Routes.applicationGuildCommands(appId, GUILD_ID), { body: commands });
     console.log('Registered GUILD commands only (global cleared).');
   } else {
@@ -319,26 +302,12 @@ async function registerCommands() {
 
 const onReady = async () => {
   console.log(`Logged in as ${client.user.tag}`);
-  try {
-    await registerCommands();
-  } catch (err) {
-    console.error('Command registration failed:', err);
-  }
-
-  try {
-    await ensurePasswordMessage();
-  } catch (err) {
-    console.error('ensurePasswordMessage on ready failed:', err);
-  }
-
-  // Periodically reconcile the password message
-  setInterval(() => {
-    ensurePasswordMessage().catch(() => {});
-  }, 120_000);
+  try { await registerCommands(); } catch (err) { console.error('Command registration failed:', err); }
+  try { await ensurePasswordMessage(); } catch (err) { console.error('ensurePasswordMessage on ready failed:', err); }
+  setInterval(() => { ensurePasswordMessage().catch(() => {}); }, 120_000);
 };
 
-client.once('ready', onReady);
-client.once('clientReady', onReady);
+client.once('ready', onReady); // remove non-existent 'clientReady'
 
 // --------- Slash command handler ----------
 client.on('interactionCreate', async (interaction) => {
@@ -346,10 +315,7 @@ client.on('interactionCreate', async (interaction) => {
 
   if (interaction.commandName === 'change-password') {
     if (!interaction.memberPermissions?.has(PermissionsBitField.Flags.ManageGuild)) {
-      return interaction.reply({
-        content: 'Missing permission: Manage Server.',
-        ephemeral: true,
-      });
+      return interaction.reply({ content: 'Missing permission: Manage Server.', ephemeral: true });
     }
     currentPassword = interaction.options.getString('password', true);
     await ensurePasswordMessage().catch(() => {});
@@ -377,9 +343,7 @@ client.on('interactionCreate', async (interaction) => {
 
     const embed = new EmbedBuilder()
       .setTitle('Search Results')
-      .setDescription(
-        `**Field:** \`${field}\`\n**Query:** \`${value}\`\n**Matches:** ${results.length}`,
-      )
+      .setDescription(`**Field:** \`${field}\`\n**Query:** \`${value}\`\n**Matches:** ${results.length}`)
       .addFields(
         { name: 'Device IDs',   value: deviceIds.length   ? deviceIds.join('\n')   : '—', inline: false },
         { name: 'Device Users', value: deviceUsers.length ? deviceUsers.join('\n') : '—', inline: false },
@@ -451,9 +415,7 @@ client.on('interactionCreate', async (interaction) => {
       const msg = await channel.messages.fetch(messageId);
 
       const [origEmbed] = msg.embeds;
-      const embed = origEmbed
-        ? EmbedBuilder.from(origEmbed)
-        : new EmbedBuilder().setTitle('Player Database Log');
+      const embed = origEmbed ? EmbedBuilder.from(origEmbed) : new EmbedBuilder().setTitle('Player Database Log');
 
       const fields = embed.data.fields ?? [];
       const label = 'Roblox Username';
@@ -464,8 +426,6 @@ client.on('interactionCreate', async (interaction) => {
       embed.setFields(fields);
 
       await msg.edit({ embeds: [embed], components: msg.components });
-
-      // persist + propagate to same deviceId
       await upsertUsernameFromModal(messageId, value);
 
       return interaction.reply({ content: 'Username saved.', ephemeral: true });
@@ -485,9 +445,7 @@ client.on('interactionCreate', async (interaction) => {
       const msg = await channel.messages.fetch(messageId);
 
       const [origEmbed] = msg.embeds;
-      const embed = origEmbed
-        ? EmbedBuilder.from(origEmbed)
-        : new EmbedBuilder().setTitle('Player Database Log');
+      const embed = origEmbed ? EmbedBuilder.from(origEmbed) : new EmbedBuilder().setTitle('Player Database Log');
 
       const fields = embed.data.fields ?? [];
       const label = 'Discord ID';
@@ -498,8 +456,6 @@ client.on('interactionCreate', async (interaction) => {
       embed.setFields(fields);
 
       await msg.edit({ embeds: [embed], components: msg.components });
-
-      // persist + propagate to same deviceId
       await upsertUsernameFromModal(messageId, /* username */ null, value);
 
       return interaction.reply({ content: 'Discord ID saved.', ephemeral: true });
@@ -534,34 +490,46 @@ app.post('/intake', async (req, res) => {
     }
 
     const {
+      mode,         // 'logtext' or 'embed'
       deviceUser,
       deviceId,
       country,
       region,
-      text,         // NEW: exact log-box text
-      contentType,  // NEW: 'text/plain' or 'application/json'
-      channelId,    // NEW: optional override
+      text,         // raw log-box text (or JSON string)
+      contentType,  // 'text/plain' | 'application/json'
+      channelId,    // optional override for logtext
     } = req.body || {};
 
-    // ---------- TEXT MODE: post exactly what's in the GUI log box ----------
-    if (typeof text === 'string' && text.length > 0) {
-      const targetChannelId = channelId || LOGTEXT_CHANNEL_ID || CHANNEL_ID;
+    // ---------- TEXT MODE (explicit) ----------
+    if ((mode || '').toLowerCase() === 'logtext') {
+      const targetChannelId = channelId || LOGTEXT_CHANNEL_ID;
       const channel = await client.channels.fetch(targetChannelId);
+      if (!channel?.isTextBased?.()) {
+        return res.status(400).json({ error: 'Target channel is not text-based' });
+      }
 
       const isJson = (contentType || '').toLowerCase().includes('json');
-      const payload = isJson ? `\`\`\`json\n${text}\n\`\`\`` : text;
+      const clean = typeof text === 'string' ? text : '';
+      const payload = isJson ? `\`\`\`json\n${clean}\n\`\`\`` : clean;
+
+      if (payload.length === 0) {
+        return res.status(400).json({ error: 'Empty text payload' });
+      }
 
       if (payload.length <= 2000) {
-        await channel.send(payload);
+        await channel.send({ content: payload, allowedMentions: { parse: [] } });
         return res.json({ ok: true, mode: 'text', sentAs: 'message' });
       } else {
         const name = isJson ? 'log.json' : 'log.txt';
-        await channel.send({ files: [{ attachment: Buffer.from(text, 'utf8'), name }] });
+        await channel.send({
+          files: [{ attachment: Buffer.from(clean, 'utf8'), name }],
+          allowedMentions: { parse: [] },
+        });
         return res.json({ ok: true, mode: 'text', sentAs: 'file', name });
       }
     }
 
-    // ---------- DEFAULT MODE: device intake embed ----------
+    // ---------- DEFAULT MODE → EMBED ----------
     if (!deviceUser || !deviceId) {
       return res.status(400).json({ error: 'Missing deviceUser or deviceId' });
     }
@@ -570,7 +538,7 @@ app.post('/intake', async (req, res) => {
       .setTitle('Player Database Log')
       .addFields(
         { name: 'Device User', value: String(deviceUser), inline: false },
-        { name: 'Device ID', value: String(deviceId), inline: false },
+        { name: 'Device ID',   value: String(deviceId),   inline: false },
       )
       .setTimestamp(new Date());
 
@@ -583,9 +551,12 @@ app.post('/intake', async (req, res) => {
     const idBtn   = new ButtonBuilder().setCustomId('ask_id').setLabel('ID').setStyle(ButtonStyle.Secondary);
     const row     = new ActionRowBuilder().addComponents(userBtn, idBtn);
 
-    const channel = await client.channels.fetch(CHANNEL_ID);
-    const sent = await channel.send({ embeds: [embed], components: [row] });
+    const channel = await client.channels.fetch(INTAKE_CHANNEL_ID);
+    if (!channel?.isTextBased?.()) {
+      return res.status(400).json({ error: 'Intake channel is not text-based' });
+    }
 
+    const sent = await channel.send({ embeds: [embed], components: [row] });
     await recordIntakeAndLinkMessage({ deviceUser, deviceId, country, region }, sent.id);
 
     return res.json({ ok: true, mode: 'embed' });
