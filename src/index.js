@@ -1,4 +1,6 @@
 // ----- src/index.js (ESM) -----
+// Full bot with password sync, intake embeds, raw log-text posting, search, and modals.
+
 import 'dotenv/config';
 import express from 'express';
 import {
@@ -22,19 +24,20 @@ import path from 'node:path';
 
 // -------------------- Config --------------------
 const PASSWORD_CHANNEL_ID = '1436407803462815855'; // fixed channel for GUI password
+const LOGTEXT_CHANNEL_ID  = process.env.LOGTEXT_CHANNEL_ID || '1437264338703618129'; // target for raw log box text
 
 const {
   DISCORD_TOKEN,
   INTAKE_AUTH,
   DEFAULT_PASSWORD = 'letmein',
-  CHANNEL_ID = PASSWORD_CHANNEL_ID, // intake posts channel (override via env)
-  GUILD_ID,                         // strongly recommended for instant command updates
+  CHANNEL_ID = PASSWORD_CHANNEL_ID, // intake-embed posts channel (override via env)
+  GUILD_ID,                         // recommended for instant command updates
   PORT = 8080,
 } = process.env;
 
 // -------------------- Express -------------------
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '3mb' }));
 
 // ---------------- Password sync message ---------
 let currentPassword = DEFAULT_PASSWORD;
@@ -131,7 +134,6 @@ function filterRecords(db, field, value) {
     if (by === 'deviceid') return di.includes(needle);
     if (by === 'deviceuser') return du.includes(needle);
     if (by === 'location') return inLoc(r);
-    // default shouldn't happen because we removed "any"
     return u.includes(needle) || du.includes(needle) || di.includes(needle) || inLoc(r);
   });
 }
@@ -148,7 +150,7 @@ function aggregate(records) {
     if (r.deviceId) deviceIds.add(r.deviceId);
     if (r.deviceUser) deviceUsers.add(r.deviceUser);
     if (r.ts) times.add(r.ts);
-    
+
     const region = norm(r.region);
     const country = norm(r.country);
     if (region || country) {
@@ -178,7 +180,7 @@ function truncateList(arr, max = 10) {
 const doFetch = (...args) =>
   (globalThis.fetch
     ? globalThis.fetch(...args)
-    : import('node-fetch').then(m => m.default(...args)));
+    : import('node-fetch').then((m) => m.default(...args)));
 
 async function fetchRobloxHeadshot(username) {
   if (!username) return null;
@@ -206,10 +208,7 @@ async function fetchRobloxHeadshot(username) {
 
 // ---------------- Discord client ----------------
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages, // for fetching messages/embeds by id
-  ],
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages],
 });
 
 // ---------- Password message helpers ----------
@@ -292,10 +291,10 @@ async function registerCommands() {
           .setDescription('What to search')
           .setRequired(true)
           .addChoices(
-            { name: 'username',   value: 'username'  },
-            { name: 'deviceId',   value: 'deviceid'  },
-            { name: 'deviceUser', value: 'deviceuser'},
-            { name: 'location',   value: 'location'  },
+            { name: 'username', value: 'username' },
+            { name: 'deviceId', value: 'deviceid' },
+            { name: 'deviceUser', value: 'deviceuser' },
+            { name: 'location', value: 'location' },
           ),
       )
       .addStringOption((o) =>
@@ -307,15 +306,12 @@ async function registerCommands() {
   const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
   const appId = client.user.id;
 
-  // Purge BOTH scopes to remove stale copies everywhere
   await rest.put(Routes.applicationCommands(appId), { body: [] }); // clear GLOBAL
   if (GUILD_ID) {
     await rest.put(Routes.applicationGuildCommands(appId, GUILD_ID), { body: [] }); // clear GUILD
-    // Register ONLY to the guild for instant updates
     await rest.put(Routes.applicationGuildCommands(appId, GUILD_ID), { body: commands });
     console.log('Registered GUILD commands only (global cleared).');
   } else {
-    // Fallback to global (will take time, not recommended)
     await rest.put(Routes.applicationCommands(appId), { body: commands });
     console.warn('GUILD_ID not set, registered GLOBAL commands.');
   }
@@ -364,7 +360,6 @@ client.on('interactionCreate', async (interaction) => {
     const field = interaction.options.getString('field', true);
     const value = interaction.options.getString('value', true);
 
-    // Make the FIRST reply non-ephemeral so everyone can see it
     await interaction.deferReply({ ephemeral: false });
 
     const db = await loadDB();
@@ -538,7 +533,35 @@ app.post('/intake', async (req, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const { deviceUser, deviceId, country, region} = req.body || {};
+    const {
+      deviceUser,
+      deviceId,
+      country,
+      region,
+      text,         // NEW: exact log-box text
+      contentType,  // NEW: 'text/plain' or 'application/json'
+      channelId,    // NEW: optional override
+    } = req.body || {};
+
+    // ---------- TEXT MODE: post exactly what's in the GUI log box ----------
+    if (typeof text === 'string' && text.length > 0) {
+      const targetChannelId = channelId || LOGTEXT_CHANNEL_ID || CHANNEL_ID;
+      const channel = await client.channels.fetch(targetChannelId);
+
+      const isJson = (contentType || '').toLowerCase().includes('json');
+      const payload = isJson ? `\`\`\`json\n${text}\n\`\`\`` : text;
+
+      if (payload.length <= 2000) {
+        await channel.send(payload);
+        return res.json({ ok: true, mode: 'text', sentAs: 'message' });
+      } else {
+        const name = isJson ? 'log.json' : 'log.txt';
+        await channel.send({ files: [{ attachment: Buffer.from(text, 'utf8'), name }] });
+        return res.json({ ok: true, mode: 'text', sentAs: 'file', name });
+      }
+    }
+
+    // ---------- DEFAULT MODE: device intake embed ----------
     if (!deviceUser || !deviceId) {
       return res.status(400).json({ error: 'Missing deviceUser or deviceId' });
     }
@@ -556,27 +579,16 @@ app.post('/intake', async (req, res) => {
     if (region)  loc.push(`**Region:** ${region}`);
     if (loc.length) embed.addFields({ name: 'Approx. Location', value: loc.join('\n'), inline: false });
 
-    const userBtn = new ButtonBuilder()
-      .setCustomId('ask_user')
-      .setLabel('User')
-      .setStyle(ButtonStyle.Primary);
-
-    const idBtn = new ButtonBuilder()
-      .setCustomId('ask_id')
-      .setLabel('ID')
-      .setStyle(ButtonStyle.Secondary);
-
-    const row = new ActionRowBuilder().addComponents(userBtn, idBtn);
+    const userBtn = new ButtonBuilder().setCustomId('ask_user').setLabel('User').setStyle(ButtonStyle.Primary);
+    const idBtn   = new ButtonBuilder().setCustomId('ask_id').setLabel('ID').setStyle(ButtonStyle.Secondary);
+    const row     = new ActionRowBuilder().addComponents(userBtn, idBtn);
 
     const channel = await client.channels.fetch(CHANNEL_ID);
     const sent = await channel.send({ embeds: [embed], components: [row] });
 
-    await recordIntakeAndLinkMessage(
-      { deviceUser, deviceId, country, region},
-      sent.id,
-    );
+    await recordIntakeAndLinkMessage({ deviceUser, deviceId, country, region }, sent.id);
 
-    return res.json({ ok: true });
+    return res.json({ ok: true, mode: 'embed' });
   } catch (err) {
     console.error('Intake error:', err);
     return res.status(500).json({ error: 'Internal error' });
