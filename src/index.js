@@ -25,7 +25,7 @@ import path from 'node:path';
 // -------------------- Config --------------------
 const PASSWORD_CHANNEL_ID = '1436407803462815855';                                  // GUI password post
 const LOGTEXT_CHANNEL_ID  = process.env.LOGTEXT_CHANNEL_ID || '1437264338703618129';// RAW log text target
-const INTAKE_CHANNEL_ID   = process.env.INTAKE_CHANNEL_ID  || PASSWORD_CHANNEL_ID;  // Player DB embeds
+const INTAKE_CHANNEL_ID   = process.env.INTAKE_CHANNEL_ID  || '1436390551153934346';  // Player DB embeds
 
 const {
   DISCORD_TOKEN,
